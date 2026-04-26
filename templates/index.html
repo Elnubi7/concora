@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ title }}</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="container">
+    <section class="card">
+      <h1>Girls-only MBTI Mental Health Chatbot</h1>
+      <p class="sub">FastAPI + MVC + GitHub Models + RAG على ملف MBTI المرفوع</p>
+
+      <div class="grid">
+        <label>
+          <span>MBTI</span>
+          <select id="mbti">
+            <option>INFJ</option><option>INFP</option><option>ENFJ</option><option>ENFP</option>
+            <option>INTJ</option><option>INTP</option><option>ENTJ</option><option>ENTP</option>
+            <option>ISTJ</option><option>ISFJ</option><option>ESTJ</option><option>ESFJ</option>
+            <option>ISTP</option><option>ISFP</option><option>ESTP</option><option>ESFP</option>
+          </select>
+        </label>
+
+        <label>
+          <span>Session ID</span>
+          <input id="session_id" placeholder="session-demo-1" />
+        </label>
+      </div>
+
+      <label class="full">
+        <span>السؤال</span>
+        <textarea id="user_message" rows="6" placeholder="اكتبي سؤالك هنا..."></textarea>
+      </label>
+
+      <div class="actions">
+        <button id="send_btn">ابعت</button>
+        <button id="rebuild_btn" class="secondary">إعادة بناء الـ index</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>الرد</h2>
+      <pre id="answer_box">لسه مافيش رد.</pre>
+    </section>
+
+    <section class="card">
+      <h2>التوصيات</h2>
+      <div id="recommendations_box">لسه مافيش توصيات.</div>
+    </section>
+
+    <section class="card">
+      <h2>Retrieval Debug</h2>
+      <pre id="retrieval_box">لسه مافيش retrieval.</pre>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

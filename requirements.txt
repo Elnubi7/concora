@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+httpx
+python-docx
+numpy
+pydantic-settings
+jinja2
+python-multipart
+pytest
