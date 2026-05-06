@@ -99,7 +99,7 @@ def test_direct_issue_uses_grounded_support_mode():
 
 
 def test_recommendations_delayed_until_threshold():
-    service = build_chat_service(RECOMMENDATIONS_AFTER_TURN=3)
+    service = build_chat_service(RECOMMENDATIONS_AFTER_TURN=4)
 
     reply = run_chat(
         service,
@@ -116,41 +116,94 @@ def test_recommendations_delayed_until_threshold():
     assert not reply.recommended_podcasts
 
 
-def test_explicit_resource_request_can_unlock_recommendations_early():
-    service = build_chat_service(RECOMMENDATIONS_AFTER_TURN=3)
-    conversation_id = "explicit-resource"
+def test_explicit_resource_request_before_turn_four_does_not_unlock_recommendations():
+    service = build_chat_service(RECOMMENDATIONS_AFTER_TURN=4)
+    conversation_id = "explicit-resource-early"
 
     run_chat(
         service,
         conversation_id=conversation_id,
-        mbti_type="INFJ",
-        user_message="أنا بتعب من الناس وبشيل همهم",
+        user_message="sad",
         user_gender="female",
     )
     reply = run_chat(
         service,
         conversation_id=conversation_id,
-        mbti_type="INFJ",
         user_message="رشحيلي فيديوهين",
         user_gender="female",
         max_videos=2,
     )
 
     assert reply.debug and reply.debug.detected_intent == "RESOURCE_REQUEST"
+    assert reply.turn_number == 2
+    assert reply.recommendations.unlocked is False
+    assert not reply.recommended_videos
+
+
+def test_explicit_resource_request_unlocks_recommendations_on_turn_four():
+    service = build_chat_service(RECOMMENDATIONS_AFTER_TURN=4)
+    conversation_id = "explicit-resource-turn4"
+
+    run_chat(
+        service,
+        conversation_id=conversation_id,
+        mbti_type="INFJ",
+        user_message="sad",
+        user_gender="female",
+    )
+    run_chat(
+        service,
+        conversation_id=conversation_id,
+        mbti_type="INFJ",
+        user_message="مش عارفة ليه",
+        user_gender="female",
+    )
+    run_chat(
+        service,
+        conversation_id=conversation_id,
+        mbti_type="INFJ",
+        user_message="حاسّة إنه بقاله فترة",
+        user_gender="female",
+    )
+    reply = run_chat(
+        service,
+        conversation_id=conversation_id,
+        mbti_type="INFJ",
+        user_message="طب ابعتيلي فيديو يفيدني",
+        user_gender="female",
+        max_videos=2,
+    )
+
+    assert reply.debug and reply.debug.detected_intent == "RESOURCE_REQUEST"
+    assert reply.turn_number == 4
     assert reply.recommendations.unlocked is True
     assert reply.recommended_videos
     assert len(reply.recommended_videos) <= 2
 
 
 def test_links_only_filters_out_null_link_recommendations():
-    service = build_chat_service(RECOMMENDATIONS_AFTER_TURN=3)
+    service = build_chat_service(RECOMMENDATIONS_AFTER_TURN=4)
     conversation_id = "links-only"
 
     run_chat(
         service,
         conversation_id=conversation_id,
         mbti_type="INFJ",
-        user_message="أنا بتعب من الناس وبشيل همهم",
+        user_message="sad",
+        user_gender="female",
+    )
+    run_chat(
+        service,
+        conversation_id=conversation_id,
+        mbti_type="INFJ",
+        user_message="مش عارفة ليه",
+        user_gender="female",
+    )
+    run_chat(
+        service,
+        conversation_id=conversation_id,
+        mbti_type="INFJ",
+        user_message="حاسّة إنه بقاله فترة",
         user_gender="female",
     )
     reply = run_chat(
@@ -165,6 +218,47 @@ def test_links_only_filters_out_null_link_recommendations():
     all_items = reply.recommended_videos + reply.recommended_books + reply.recommended_podcasts
     assert all_items
     assert all(item.url for item in all_items)
+
+
+def test_turn_four_with_enough_context_moves_forward_and_can_include_links():
+    service = build_chat_service(RECOMMENDATIONS_AFTER_TURN=4)
+    conversation_id = "turn-four-forward"
+
+    run_chat(
+        service,
+        conversation_id=conversation_id,
+        mbti_type="INFJ",
+        user_message="sad",
+        user_gender="female",
+    )
+    run_chat(
+        service,
+        conversation_id=conversation_id,
+        mbti_type="INFJ",
+        user_message="مش عارفة ليه",
+        user_gender="female",
+    )
+    run_chat(
+        service,
+        conversation_id=conversation_id,
+        mbti_type="INFJ",
+        user_message="حاسّة إنه بقاله فترة",
+        user_gender="female",
+    )
+    reply = run_chat(
+        service,
+        conversation_id=conversation_id,
+        mbti_type="INFJ",
+        user_message="أعمل إيه؟",
+        user_gender="female",
+        max_videos=2,
+    )
+
+    assert reply.turn_number == 4
+    assert reply.debug and reply.debug.response_mode in {"GROUNDED_SUPPORT_MODE", "RESOURCE_MODE"}
+    assert reply.response.practical_steps
+    assert reply.response.follow_up_question
+    assert reply.response.follow_up_question.count("؟") <= 1
 
 
 def test_mbti_language_stays_nondiagnostic():
@@ -240,3 +334,99 @@ def test_crisis_input_triggers_immediate_crisis_mode():
     assert reply.debug and reply.debug.response_mode == "CRISIS_MODE"
     assert "خطر" in reply.response.understanding or "الأمان" in reply.response.understanding
     assert not reply.recommended_videos
+
+
+def test_exact_repeated_short_message_is_detected():
+    service = build_chat_service()
+    conversation_id = "repeat-detected"
+
+    run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+    reply = run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+
+    assert reply.debug
+    assert reply.debug.exact_repetition_count == 2
+    assert reply.debug.repeated_meaning_count == 2
+    assert reply.safety.is_crisis is False
+
+
+def test_second_repeated_message_does_not_get_same_reply():
+    service = build_chat_service()
+    conversation_id = "repeat-varied-reply"
+
+    first = run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+    second = run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+
+    assert first.response.follow_up_question != second.response.follow_up_question
+    assert first.response.understanding != second.response.understanding
+    assert second.debug and second.debug.repeated_meaning_count == 2
+
+
+def test_third_repetition_shifts_to_guided_choice_question():
+    service = build_chat_service()
+    conversation_id = "repeat-guided-choice"
+
+    run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+    run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+    third = run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+
+    combined = " ".join(filter(None, [third.response.follow_up_question, third.response.choice_prompt]))
+    assert third.debug and third.debug.repeated_meaning_count >= 3
+    assert "موقف" in combined
+    assert "بدون سبب" in combined or "ضغط" in combined
+
+
+def test_loop_detection_changes_strategy_after_repeated_user_input():
+    service = build_chat_service()
+    conversation_id = "repeat-loop"
+
+    run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+    run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+    run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+    fourth = run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+
+    assert fourth.debug and fourth.debug.loop_detected is True
+    assert fourth.debug.response_mode == "GROUNDED_SUPPORT_MODE"
+    assert fourth.response.practical_steps
+    assert "خطوة خطوة" in (fourth.response.follow_up_question or "")
+
+
+def test_repeated_sad_does_not_trigger_crisis_mode():
+    service = build_chat_service()
+    conversation_id = "repeat-not-crisis"
+
+    for _ in range(4):
+        reply = run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+
+    assert reply.safety.is_crisis is False
+    assert reply.debug and reply.debug.response_mode != "CRISIS_MODE"
+
+
+def test_repetition_memory_resets_when_user_adds_meaningful_detail():
+    service = build_chat_service()
+    conversation_id = "repeat-reset"
+
+    run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+    run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+    reply = run_chat(
+        service,
+        conversation_id=conversation_id,
+        user_message="sad because my breakup still hurts",
+        user_gender="female",
+    )
+
+    assert reply.debug
+    assert reply.debug.repeated_meaning_count == 1
+    assert reply.debug.exact_repetition_count == 1
+    assert reply.debug.loop_detected is False
+
+
+def test_near_duplicate_inputs_count_as_repeated_meaning():
+    service = build_chat_service()
+    conversation_id = "repeat-near-duplicate"
+
+    run_chat(service, conversation_id=conversation_id, user_message="sad", user_gender="female")
+    reply = run_chat(service, conversation_id=conversation_id, user_message="I feel sad", user_gender="female")
+
+    assert reply.debug
+    assert reply.debug.repeated_meaning_count == 2
+    assert reply.debug.semantic_repetition_count == 2

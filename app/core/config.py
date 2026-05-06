@@ -40,7 +40,7 @@ class Settings(BaseSettings):
 
     TARGET_AUDIENCE: str = "female_only"  # female_only | all
     RESPONSE_STYLE: str = "feminine"  # feminine | neutral
-    RECOMMENDATIONS_AFTER_TURN: int = 3
+    RECOMMENDATIONS_AFTER_TURN: int = 4
     DEFAULT_MAX_VIDEOS: int = 2
     DEFAULT_MAX_BOOKS: int = 3
     DEFAULT_MAX_PODCASTS: int = 2

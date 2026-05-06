@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.services.repetition_detector import RepetitionState
 from app.utils.text_utils import normalize_text, tokenize
 
 
@@ -30,6 +31,8 @@ class PolicyDecision:
     choice_prompt: str | None = None
     allow_immediate_resources: bool = False
     is_followup_answer: bool = False
+    repeat_aware_strategy: str = "default"
+    repetition_state: RepetitionState | None = None
 
 
 class ConversationPolicy:
@@ -89,7 +92,8 @@ class ConversationPolicy:
     }
     RESOURCE_MARKERS = {
         "رشح", "رشحي", "رشحلي", "رشحيلي", "فيديو", "فيديوهات", "كتاب", "كتب", "بودكاست",
-        "بودكاستات", "مصادر", "resource", "resources", "podcast", "video", "book",
+        "بودكاستات", "لينك", "لينكات", "روابط", "رابط", "مصادر", "resource", "resources",
+        "podcast", "video", "videos", "book", "link", "links",
     }
     ADVICE_MARKERS = {
         "اعمل ايه", "أعمل ايه", "أعمل إيه", "اعمل إيه", "ايه الحل", "إيه الحل", "الحل ايه",
@@ -125,14 +129,26 @@ class ConversationPolicy:
         conversation_history: list[dict[str, str]],
         assistant_turns: int,
         response_style: str,
+        repetition_state: RepetitionState | None = None,
     ) -> PolicyDecision:
+        repetition_state = repetition_state or RepetitionState()
         normalized = normalize_text(message)
         tokens = tokenize(message)
         last_assistant = self._last_message(conversation_history, role="assistant")
         prior_user_messages = [item["content"] for item in conversation_history if item.get("role") == "user"][:-1]
-        followup_answer = bool(last_assistant and "؟" in last_assistant and prior_user_messages)
+        followup_answer = bool(
+            last_assistant
+            and "؟" in last_assistant
+            and prior_user_messages
+            and not repetition_state.failed_to_answer_previous_followup
+        )
         primary_emotion = self._detect_primary_emotion(normalized, tokens, prior_user_messages)
-        enough_context = followup_answer or self._has_specific_context(message, normalized, tokens)
+        enough_context = (
+            followup_answer
+            or self._has_specific_context(message, normalized, tokens)
+            or repetition_state.repeated_meaning_count >= 3
+        )
+        repeat_strategy = self._choose_repeat_strategy(repetition_state)
 
         if self._contains_any(normalized, self.CRISIS_MARKERS):
             return PolicyDecision(
@@ -140,6 +156,7 @@ class ConversationPolicy:
                 response_mode=MODE_CRISIS,
                 primary_emotion=primary_emotion,
                 enough_context=True,
+                repetition_state=repetition_state,
             )
 
         if self._is_small_talk(normalized, tokens):
@@ -154,22 +171,24 @@ class ConversationPolicy:
                     response_style=response_style,
                 ),
                 followup_question_reason="small_talk_opening",
+                repetition_state=repetition_state,
             )
 
         if self._is_resource_request(normalized):
             return PolicyDecision(
                 detected_intent=INTENT_RESOURCE_REQUEST,
-                response_mode=MODE_RESOURCE if (assistant_turns + 1) >= self.settings.RECOMMENDATIONS_AFTER_TURN or enough_context else MODE_CHAT,
+                response_mode=MODE_RESOURCE if (assistant_turns + 1) >= self.settings.RECOMMENDATIONS_AFTER_TURN else MODE_CHAT,
                 primary_emotion=primary_emotion,
                 enough_context=enough_context,
-                allow_immediate_resources=enough_context,
-                follow_up_question=None if enough_context else self._style_line(
+                allow_immediate_resources=(assistant_turns + 1) >= self.settings.RECOMMENDATIONS_AFTER_TURN,
+                follow_up_question=None if (assistant_turns + 1) >= self.settings.RECOMMENDATIONS_AFTER_TURN else self._style_line(
                     feminine="أكيد. تحبي موارد عن إيه بالضبط: حزن، قلق، ضغط من الناس، ولا حاجة تانية؟",
                     neutral="أكيد. تحب موارد عن إيه بالضبط: حزن، قلق، ضغط من الناس، ولا حاجة تانية؟",
                     response_style=response_style,
                 ),
-                followup_question_reason=None if enough_context else "resource_request_needs_topic",
-                choice_prompt=None if enough_context else "ممكن نحدد الموضوع الأول عشان الترشيح يطلع فعلاً مناسب.",
+                followup_question_reason=None if (assistant_turns + 1) >= self.settings.RECOMMENDATIONS_AFTER_TURN else "resource_request_needs_topic",
+                choice_prompt=None if (assistant_turns + 1) >= self.settings.RECOMMENDATIONS_AFTER_TURN else "ممكن نحدد الموضوع الأول عشان الترشيح يطلع فعلاً مناسب.",
+                repetition_state=repetition_state,
             )
 
         if self._is_advice_request(normalized):
@@ -180,8 +199,15 @@ class ConversationPolicy:
                     primary_emotion=primary_emotion,
                     enough_context=True,
                     is_followup_answer=followup_answer,
+                    repeat_aware_strategy=repeat_strategy,
+                    repetition_state=repetition_state,
                 )
-            question, reason, choice = self._build_follow_up(primary_emotion, response_style, vague=True)
+            question, reason, choice = self._build_follow_up(
+                primary_emotion,
+                response_style,
+                vague=True,
+                repetition_state=repetition_state,
+            )
             return PolicyDecision(
                 detected_intent=INTENT_ADVICE_REQUEST,
                 response_mode=MODE_CHAT,
@@ -190,10 +216,17 @@ class ConversationPolicy:
                 follow_up_question=question,
                 followup_question_reason=reason,
                 choice_prompt=choice,
+                repeat_aware_strategy=repeat_strategy,
+                repetition_state=repetition_state,
             )
 
         if self._is_vague_distress(normalized, tokens) and not followup_answer and assistant_turns < self.settings.CHAT_FOLLOWUP_TURNS:
-            question, reason, choice = self._build_follow_up(primary_emotion, response_style, vague=True)
+            question, reason, choice = self._build_follow_up(
+                primary_emotion,
+                response_style,
+                vague=True,
+                repetition_state=repetition_state,
+            )
             return PolicyDecision(
                 detected_intent=INTENT_VAGUE_DISTRESS,
                 response_mode=MODE_CHAT,
@@ -202,10 +235,55 @@ class ConversationPolicy:
                 follow_up_question=question,
                 followup_question_reason=reason,
                 choice_prompt=choice,
+                repeat_aware_strategy=repeat_strategy,
+                repetition_state=repetition_state,
             )
 
         if self._is_short_emotional_signal(message, normalized, tokens):
-            question, reason, choice = self._build_follow_up(primary_emotion, response_style, vague=False)
+            if repetition_state.loop_detected or repetition_state.repeated_meaning_count >= 4:
+                return PolicyDecision(
+                    detected_intent=INTENT_SHORT_EMOTIONAL_SIGNAL,
+                    response_mode=MODE_GROUNDED,
+                    primary_emotion=primary_emotion,
+                    enough_context=True,
+                    is_followup_answer=False,
+                    repeat_aware_strategy="micro_support",
+                    repetition_state=repetition_state,
+                )
+            if repetition_state.repeated_meaning_count >= 3:
+                question, reason, choice = self._build_follow_up(
+                    primary_emotion,
+                    response_style,
+                    vague=False,
+                    repetition_state=repetition_state,
+                )
+                return PolicyDecision(
+                    detected_intent=INTENT_SHORT_EMOTIONAL_SIGNAL,
+                    response_mode=MODE_CHAT,
+                    primary_emotion=primary_emotion,
+                    enough_context=False,
+                    follow_up_question=question,
+                    followup_question_reason=reason,
+                    choice_prompt=choice,
+                    repeat_aware_strategy=repeat_strategy,
+                    repetition_state=repetition_state,
+                )
+            if enough_context or assistant_turns >= self.settings.CHAT_FOLLOWUP_TURNS:
+                return PolicyDecision(
+                    detected_intent=INTENT_CLEAR_PROBLEM_STATEMENT,
+                    response_mode=MODE_GROUNDED,
+                    primary_emotion=primary_emotion,
+                    enough_context=True,
+                    is_followup_answer=followup_answer,
+                    repeat_aware_strategy=repeat_strategy,
+                    repetition_state=repetition_state,
+                )
+            question, reason, choice = self._build_follow_up(
+                primary_emotion,
+                response_style,
+                vague=False,
+                repetition_state=repetition_state,
+            )
             return PolicyDecision(
                 detected_intent=INTENT_SHORT_EMOTIONAL_SIGNAL,
                 response_mode=MODE_CHAT,
@@ -214,6 +292,8 @@ class ConversationPolicy:
                 follow_up_question=question,
                 followup_question_reason=reason,
                 choice_prompt=choice,
+                repeat_aware_strategy=repeat_strategy,
+                repetition_state=repetition_state,
             )
 
         return PolicyDecision(
@@ -222,6 +302,8 @@ class ConversationPolicy:
             primary_emotion=primary_emotion,
             enough_context=True,
             is_followup_answer=followup_answer,
+            repeat_aware_strategy=repeat_strategy,
+            repetition_state=repetition_state,
         )
 
     def _is_short_emotional_signal(self, message: str, normalized: str, tokens: list[str]) -> bool:
@@ -274,7 +356,18 @@ class ConversationPolicy:
             return "confusion"
         return "distress" if normalized else None
 
-    def _build_follow_up(self, primary_emotion: str | None, response_style: str, *, vague: bool) -> tuple[str, str, str | None]:
+    def _build_follow_up(
+        self,
+        primary_emotion: str | None,
+        response_style: str,
+        *,
+        vague: bool,
+        repetition_state: RepetitionState,
+    ) -> tuple[str, str, str | None]:
+        if repetition_state.loop_detected or repetition_state.repeated_meaning_count >= 3:
+            return self._build_guided_choice(primary_emotion, response_style)
+        if repetition_state.repeated_meaning_count == 2:
+            return self._build_repeat_follow_up(primary_emotion, response_style)
         if primary_emotion == "sadness":
             return (
                 self._style_line(
@@ -345,6 +438,87 @@ class ConversationPolicy:
         if vague:
             choice = "لو أسهل، اختار/ي أقرب وصف دلوقتي وأنا أبني عليه."
         return question, "generic_emotion_clarification", choice
+
+    def _build_repeat_follow_up(self, primary_emotion: str | None, response_style: str) -> tuple[str, str, str | None]:
+        if primary_emotion == "sadness":
+            return (
+                self._style_line(
+                    feminine="حاسّة إن الإحساس نفسه لسه تقيل عليكي. ده زعل من موقف، ولا حزن عام بقاله شوية؟",
+                    neutral="حاسس إن الإحساس نفسه لسه تقيل عليك. ده زعل من موقف، ولا حزن عام بقاله شوية؟",
+                    response_style=response_style,
+                ),
+                "repeat_sadness_simplified",
+                None,
+            )
+        if primary_emotion == "burnout":
+            return (
+                self._style_line(
+                    feminine="واضح إن الخنقة لسه مستمرة. أقرب سبب ليها ناس، مسؤوليات، ولا ضغط داخلي؟",
+                    neutral="واضح إن الخنقة لسه مستمرة. أقرب سبب ليها ناس، مسؤوليات، ولا ضغط داخلي؟",
+                    response_style=response_style,
+                ),
+                "repeat_burnout_simplified",
+                None,
+            )
+        if primary_emotion == "anxiety":
+            return (
+                self._style_line(
+                    feminine="واضح إن القلق لسه ماسكك. هو من موضوع محدد، ولا منتشر في اليوم كله؟",
+                    neutral="واضح إن القلق لسه ماسكك. هو من موضوع محدد، ولا منتشر في اليوم كله؟",
+                    response_style=response_style,
+                ),
+                "repeat_anxiety_simplified",
+                None,
+            )
+        return (
+            self._style_line(
+                feminine="حاسّة إن نفس الإحساس لسه موجود. تحبي نختار أقرب وصف ليه بدل ما نشرحه؟",
+                neutral="حاسس إن نفس الإحساس لسه موجود. تحب نختار أقرب وصف ليه بدل ما نشرحه؟",
+                response_style=response_style,
+            ),
+            "repeat_generic_simplified",
+            "ممكن تختار/ي كلمة أقرب: حزن / قلق / ضغط.",
+        )
+
+    def _build_guided_choice(self, primary_emotion: str | None, response_style: str) -> tuple[str, str, str | None]:
+        if primary_emotion == "sadness":
+            return (
+                self._style_line(
+                    feminine="تمام، مش لازم تشرحي كتير دلوقتي. اختاري كلمة واحدة بس: موقف / بدون سبب / ضغط",
+                    neutral="تمام، مش لازم تشرح كتير دلوقتي. اختر كلمة واحدة بس: موقف / بدون سبب / ضغط",
+                    response_style=response_style,
+                ),
+                "repeat_sadness_guided_choice",
+                None,
+            )
+        if primary_emotion == "burnout":
+            return (
+                self._style_line(
+                    feminine="خلينا نبسّطها جدًا: ناس / مسؤوليات / بدون سبب واضح. اختاري الأقرب.",
+                    neutral="خلينا نبسّطها جدًا: ناس / مسؤوليات / بدون سبب واضح. اختر الأقرب.",
+                    response_style=response_style,
+                ),
+                "repeat_burnout_guided_choice",
+                None,
+            )
+        return (
+            self._style_line(
+                feminine="خلينا نمشي بطريقة أبسط: 1) موقف 2) بدون سبب 3) ضغط. اختاري الأقرب.",
+                neutral="خلينا نمشي بطريقة أبسط: 1) موقف 2) بدون سبب 3) ضغط. اختر الأقرب.",
+                response_style=response_style,
+            ),
+            "repeat_generic_guided_choice",
+            None,
+        )
+
+    def _choose_repeat_strategy(self, repetition_state: RepetitionState) -> str:
+        if repetition_state.loop_detected or repetition_state.repeated_meaning_count >= 4:
+            return "micro_support"
+        if repetition_state.repeated_meaning_count >= 3:
+            return "guided_choice"
+        if repetition_state.repeated_meaning_count == 2:
+            return "simplified_followup"
+        return "default"
 
     def _style_line(self, *, feminine: str, neutral: str, response_style: str) -> str:
         return feminine if response_style == "feminine" else neutral

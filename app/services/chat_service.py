@@ -21,6 +21,7 @@ from app.services.conversation_policy import (
     MODE_RESOURCE,
     ConversationPolicy,
 )
+from app.services.repetition_detector import RepetitionDetector, RepetitionState
 from app.utils.text_utils import lexical_overlap_score, normalize_text
 
 
@@ -36,6 +37,7 @@ class ChatService:
         fallback_service,
         conversation_policy: ConversationPolicy | None = None,
         answer_deduper: AnswerDeduper | None = None,
+        repetition_detector: RepetitionDetector | None = None,
     ) -> None:
         self.settings = settings
         self.kb_service = kb_service
@@ -46,12 +48,19 @@ class ChatService:
         self.fallback_service = fallback_service
         self.conversation_policy = conversation_policy or ConversationPolicy(settings)
         self.answer_deduper = answer_deduper or AnswerDeduper()
+        self.repetition_detector = repetition_detector or RepetitionDetector()
 
     async def chat(self, request) -> ChatResponse:
         response_style = self._resolve_response_style(request.response_style, request.user_gender)
         conversation_id = self.session_store.ensure_conversation(request.conversation_id)
         self.session_store.append_user_message(conversation_id, request.user_message)
         conversation_history = self.session_store.get_history(conversation_id)
+        repetition_state = self.repetition_detector.detect(
+            message=request.user_message,
+            previous_state=self.session_store.get_repetition_state(conversation_id),
+            recent_user_messages=self.session_store.get_recent_user_messages(conversation_id, limit=4),
+        )
+        self.session_store.set_repetition_state(conversation_id, repetition_state)
         prior_turns = self.session_store.get_turn_number(conversation_id)
         next_turn_number = prior_turns + 1
         unlock_turn = request.recommendations_after_turn or self.settings.RECOMMENDATIONS_AFTER_TURN
@@ -66,11 +75,18 @@ class ChatService:
             conversation_history=conversation_history,
             assistant_turns=prior_turns,
             response_style=response_style,
+            repetition_state=repetition_state,
         )
 
         if safety.blocked and safety.is_crisis:
             structured = StructuredAnswer(**self._compose_crisis_response(response_style))
             turn_number = self.session_store.append_assistant_message(conversation_id, self._history_text(structured))
+            self._store_assistant_repetition_state(
+                conversation_id=conversation_id,
+                repetition_state=repetition_state,
+                response_mode=MODE_CRISIS,
+                structured=structured,
+            )
             return ChatResponse(
                 source="safety_guard",
                 conversation_id=conversation_id,
@@ -92,6 +108,7 @@ class ChatService:
                     issue_match_scores={},
                     topic_match_scores={},
                     recommendation_triggered=False,
+                    repetition_state=repetition_state,
                 ),
             )
 
@@ -103,6 +120,12 @@ class ChatService:
                 support_note="يمكن تعديل TARGET_AUDIENCE و RESPONSE_STYLE من الإعدادات.",
             )
             turn_number = self.session_store.append_assistant_message(conversation_id, self._history_text(structured))
+            self._store_assistant_repetition_state(
+                conversation_id=conversation_id,
+                repetition_state=repetition_state,
+                response_mode=policy.response_mode,
+                structured=structured,
+            )
             return ChatResponse(
                 source="safety_guard",
                 conversation_id=conversation_id,
@@ -124,6 +147,7 @@ class ChatService:
                     issue_match_scores={},
                     topic_match_scores={},
                     recommendation_triggered=False,
+                    repetition_state=repetition_state,
                 ),
             )
 
@@ -135,9 +159,17 @@ class ChatService:
                 detected_intent=policy.detected_intent,
                 follow_up_question=policy.follow_up_question,
                 choice_prompt=policy.choice_prompt,
+                repetition_state=repetition_state,
+                repeat_aware_strategy=policy.repeat_aware_strategy,
             )
             structured = StructuredAnswer(**structured_dict)
             turn_number = self.session_store.append_assistant_message(conversation_id, self._history_text(structured))
+            self._store_assistant_repetition_state(
+                conversation_id=conversation_id,
+                repetition_state=repetition_state,
+                response_mode=policy.response_mode,
+                structured=structured,
+            )
             return ChatResponse(
                 source="conversation_policy_chat",
                 conversation_id=conversation_id,
@@ -159,6 +191,7 @@ class ChatService:
                     issue_match_scores={},
                     topic_match_scores={},
                     recommendation_triggered=False,
+                    repetition_state=repetition_state,
                 ),
             )
 
@@ -274,6 +307,8 @@ class ChatService:
                     primary_emotion=policy.primary_emotion,
                     next_turn_number=next_turn_number,
                     unlock_turn=unlock_turn,
+                    repeat_aware_strategy=policy.repeat_aware_strategy,
+                    repetition_state=repetition_state,
                 )
             if not structured_dict:
                 structured_dict = self._compose_grounded_support_response(
@@ -289,6 +324,8 @@ class ChatService:
                     primary_emotion=policy.primary_emotion,
                     next_turn_number=next_turn_number,
                     unlock_turn=unlock_turn,
+                    repeat_aware_strategy=policy.repeat_aware_strategy,
+                    repetition_state=repetition_state,
                 )
             source = (
                 "retrieval_augmented_generation"
@@ -301,6 +338,12 @@ class ChatService:
             **self.answer_deduper.dedupe_structured(structured_dict, max_steps=max_steps)
         )
         turn_number = self.session_store.append_assistant_message(conversation_id, self._history_text(structured))
+        self._store_assistant_repetition_state(
+            conversation_id=conversation_id,
+            repetition_state=repetition_state,
+            response_mode=policy.response_mode,
+            structured=structured,
+        )
         recommendations_note = self._build_recommendations_note(
             recommendations_unlocked=recommendations_unlocked,
             unlock_turn=unlock_turn,
@@ -339,6 +382,7 @@ class ChatService:
                     field="topic_title",
                 ),
                 recommendation_triggered=bool(recommended_videos or recommended_books or recommended_podcasts),
+                repetition_state=repetition_state,
             ),
         )
 
@@ -361,12 +405,25 @@ class ChatService:
         detected_intent: str,
         follow_up_question: str | None,
         choice_prompt: str | None,
+        repetition_state: RepetitionState,
+        repeat_aware_strategy: str,
     ) -> dict[str, Any]:
-        understanding = self._chat_acknowledgment(primary_emotion, response_style)
+        understanding = self._chat_acknowledgment(
+            primary_emotion,
+            response_style,
+            repetition_state=repetition_state,
+            repeat_aware_strategy=repeat_aware_strategy,
+        )
         if detected_intent == "ADVICE_REQUEST":
             grounded_answer = self._style_line(
                 feminine="أقدر أساعدك، بس محتاجة أفهم الصورة أقرب الأول.",
                 neutral="أقدر أساعدك، بس محتاج أفهم الصورة أقرب الأول.",
+                response_style=response_style,
+            )
+        elif repeat_aware_strategy == "micro_support":
+            grounded_answer = self._style_line(
+                feminine="واضح إن شرح الإحساس صعب دلوقتي، فخلينا نمشي بخطوة صغيرة بدل ما نضغط على الكلام.",
+                neutral="واضح إن شرح الإحساس صعب دلوقتي، فخلينا نمشي بخطوة صغيرة بدل ما نضغط على الكلام.",
                 response_style=response_style,
             )
         elif detected_intent == "SMALL_TALK_OR_GREETING":
@@ -385,7 +442,7 @@ class ChatService:
             "understanding": understanding,
             "mbti_connection": "",
             "grounded_answer": grounded_answer,
-            "practical_steps": [],
+            "practical_steps": self._repeat_micro_steps(response_style, primary_emotion) if repeat_aware_strategy == "micro_support" else [],
             "follow_up_question": follow_up_question,
             "choice_prompt": choice_prompt,
             "support_note": "لو الإحساس وصل لخطر على سلامتك، الأولوية لطلب مساعدة فورية الآن.",
@@ -406,12 +463,16 @@ class ChatService:
         primary_emotion: str | None,
         next_turn_number: int,
         unlock_turn: int,
+        repeat_aware_strategy: str,
+        repetition_state: RepetitionState,
     ) -> dict[str, Any]:
         understanding = self._compose_understanding(
             message=message,
             response_style=response_style,
             primary_issue=primary_issue,
             primary_emotion=primary_emotion,
+            repetition_state=repetition_state,
+            repeat_aware_strategy=repeat_aware_strategy,
         )
         grounded_answer = self._compose_grounded_answer(
             message=message,
@@ -421,6 +482,7 @@ class ChatService:
             primary_question=primary_question,
             emotion_entry=emotion_entry,
             primary_emotion=primary_emotion,
+            repeat_aware_strategy=repeat_aware_strategy,
         )
         mbti_connection = self._compose_mbti_connection(
             response_style=response_style,
@@ -435,10 +497,12 @@ class ChatService:
             response_style=response_style,
             primary_emotion=primary_emotion,
             max_steps=2 if next_turn_number <= 2 else 4,
+            repeat_aware_strategy=repeat_aware_strategy,
         )
         follow_up_question = self._compose_transition_question(
             response_style=response_style,
             allow_resources=next_turn_number >= unlock_turn,
+            repeat_aware_strategy=repeat_aware_strategy,
         )
         return {
             "understanding": understanding,
@@ -552,8 +616,22 @@ class ChatService:
         response_style: str,
         primary_issue: str | None,
         primary_emotion: str | None,
+        repetition_state: RepetitionState,
+        repeat_aware_strategy: str,
     ) -> str:
         normalized = normalize_text(message)
+        if repeat_aware_strategy == "micro_support":
+            return self._style_line(
+                feminine="واضح إنك عالقة في نفس الإحساس ومش سهل توضحيه دلوقتي.",
+                neutral="واضح إنك عالق في نفس الإحساس ومش سهل توضحه دلوقتي.",
+                response_style=response_style,
+            )
+        if repetition_state.repeated_meaning_count == 2:
+            return self._style_line(
+                feminine="حاسّة إن نفس الإحساس لسه حاضر ومش سهل يتقال بشكل أوضح.",
+                neutral="حاسس إن نفس الإحساس لسه حاضر ومش سهل يتقال بشكل أوضح.",
+                response_style=response_style,
+            )
         if "الناس" in normalized and any(word in normalized for word in ["هم", "مشاعر", "بتعب", "استنزاف", "شايل", "شايله", "بشيل"]):
             return self._style_line(
                 feminine="فهمت. واضح إنك شايلة حمل مشاعر الناس وده مستنزفك.",
@@ -584,8 +662,15 @@ class ChatService:
         primary_question: str | None,
         emotion_entry: dict[str, Any] | None,
         primary_emotion: str | None,
+        repeat_aware_strategy: str,
     ) -> str:
         normalized = normalize_text(message)
+        if repeat_aware_strategy == "micro_support":
+            return self._style_line(
+                feminine="بما إن نفس الإحساس بيتكرر، فالأهم دلوقتي مش تفسير كامل؛ الأهم إننا ندي جسمك وعقلك مساحة أهدى وخطوة واضحة جدًا.",
+                neutral="بما إن نفس الإحساس بيتكرر، فالأهم دلوقتي مش تفسير كامل؛ الأهم إننا ندي جسمك وعقلك مساحة أهدى وخطوة واضحة جدًا.",
+                response_style=response_style,
+            )
         if "الناس" in normalized and any(word in normalized for word in ["هم", "بشيل", "شايل", "شايله", "استنزاف"]):
             return self._style_line(
                 feminine="لما تفضلي شايلة هم الناس طول الوقت، حدودك بتتعب وبتحسي إنك مستنزفة حتى لو ما فيش موقف واحد واضح.",
@@ -639,7 +724,13 @@ class ChatService:
             )
         return ""
 
-    def _compose_transition_question(self, *, response_style: str, allow_resources: bool) -> str:
+    def _compose_transition_question(self, *, response_style: str, allow_resources: bool, repeat_aware_strategy: str) -> str:
+        if repeat_aware_strategy == "micro_support":
+            return self._style_line(
+                feminine="تحبي أكمل معاكي خطوة خطوة؟",
+                neutral="تحب أكمل معك خطوة خطوة؟",
+                response_style=response_style,
+            )
         if allow_resources:
             return self._style_line(
                 feminine="تحبي نكمل بخطوات عملية، نفهم ليه ده بيتكرر، ولا أرشح لك موارد مناسبة؟",
@@ -652,7 +743,40 @@ class ChatService:
             response_style=response_style,
         )
 
-    def _chat_acknowledgment(self, primary_emotion: str | None, response_style: str) -> str:
+    def _chat_acknowledgment(
+        self,
+        primary_emotion: str | None,
+        response_style: str,
+        *,
+        repetition_state: RepetitionState,
+        repeat_aware_strategy: str,
+    ) -> str:
+        if repeat_aware_strategy == "micro_support":
+            return self._style_line(
+                feminine="واضح إنك واقفة في نفس الإحساس ومش مطلوب منك تشرحيه كامل دلوقتي.",
+                neutral="واضح إنك واقف في نفس الإحساس ومش مطلوب منك تشرحه كامل دلوقتي.",
+                response_style=response_style,
+            )
+        if repetition_state.repeated_meaning_count == 2:
+            repeated_mapping = {
+                "sadness": self._style_line(
+                    feminine="حاسّة إن الإحساس نفسه لسه تقيل عليكي.",
+                    neutral="حاسس إن الإحساس نفسه لسه تقيل عليك.",
+                    response_style=response_style,
+                ),
+                "burnout": self._style_line(
+                    feminine="واضح إن الخنقة لسه موجودة ومش لاقية مخرج.",
+                    neutral="واضح إن الخنقة لسه موجودة ومش لاقي مخرج.",
+                    response_style=response_style,
+                ),
+                "anxiety": self._style_line(
+                    feminine="واضح إن القلق لسه ماسكك.",
+                    neutral="واضح إن القلق لسه ماسكك.",
+                    response_style=response_style,
+                ),
+            }
+            if primary_emotion in repeated_mapping:
+                return repeated_mapping[primary_emotion]
         mapping = {
             "sadness": self._style_line(
                 feminine="واضح إنك حاسة بحزن.",
@@ -701,7 +825,10 @@ class ChatService:
         response_style: str,
         primary_emotion: str | None,
         max_steps: int,
+        repeat_aware_strategy: str,
     ) -> list[str]:
+        if repeat_aware_strategy == "micro_support":
+            return self._repeat_micro_steps(response_style, primary_emotion)[:max_steps]
         unique_steps = self._style_steps(advice_steps, response_style)[:max_steps]
         if unique_steps:
             return unique_steps
@@ -728,6 +855,33 @@ class ChatService:
             ],
         }
         return self._style_steps(defaults_map.get(primary_emotion, ["حددي أكثر نقطة ضاغطة الآن."]), response_style)[:max_steps]
+
+    def _repeat_micro_steps(self, response_style: str, primary_emotion: str | None) -> list[str]:
+        if primary_emotion == "sadness":
+            steps = [
+                self._style_line(
+                    feminine="خدي 3 أنفاس ببطء من غير ما تحاولي تفسري الإحساس كله.",
+                    neutral="خذ 3 أنفاس ببطء من غير ما تحاول تفسر الإحساس كله.",
+                    response_style=response_style,
+                ),
+            ]
+        elif primary_emotion == "burnout":
+            steps = [
+                self._style_line(
+                    feminine="سيبي كل حاجة دقيقة واحدة وركزي بس: مين أكتر شيء ضاغطك الآن؟",
+                    neutral="سيب كل حاجة دقيقة واحدة وركز بس: مين أكتر شيء ضاغطك الآن؟",
+                    response_style=response_style,
+                ),
+            ]
+        else:
+            steps = [
+                self._style_line(
+                    feminine="خدي نفس ببطء 3 مرات وركزي بس على إحساس جسمك دلوقتي.",
+                    neutral="خذ نفس ببطء 3 مرات وركز بس على إحساس جسمك دلوقتي.",
+                    response_style=response_style,
+                ),
+            ]
+        return steps
 
     def _build_recommendations_note(self, *, recommendations_unlocked: bool, unlock_turn: int, resource_request: bool) -> str:
         if resource_request and recommendations_unlocked:
@@ -807,6 +961,8 @@ class ChatService:
         primary_emotion: str | None,
         next_turn_number: int,
         unlock_turn: int,
+        repeat_aware_strategy: str,
+        repetition_state: RepetitionState,
     ) -> dict[str, Any] | None:
         history_lines = []
         for item in conversation_history[-4:]:
@@ -854,6 +1010,9 @@ class ChatService:
                 "avoid_repetition": True,
                 "be_short_if_early_turn": next_turn_number <= 2,
                 "offer_resources_only_if_allowed": next_turn_number >= unlock_turn,
+                "repeat_strategy": repeat_aware_strategy,
+                "repeated_meaning_count": repetition_state.repeated_meaning_count,
+                "loop_detected": repetition_state.loop_detected,
             },
             "user_message": request_message,
             "mbti_type": mbti_type,
@@ -892,6 +1051,22 @@ class ChatService:
             }
         except Exception:
             return None
+
+    def _store_assistant_repetition_state(
+        self,
+        *,
+        conversation_id: str,
+        repetition_state: RepetitionState,
+        response_mode: str,
+        structured: StructuredAnswer,
+    ) -> None:
+        updated = self.repetition_detector.register_assistant_response(
+            repetition_state,
+            response_mode=response_mode,
+            follow_up_question=structured.follow_up_question,
+            opening_phrase=structured.understanding,
+        )
+        self.session_store.set_repetition_state(conversation_id, updated)
 
     def _extract_json(self, text: str) -> Any:
         text = text.strip()
@@ -941,6 +1116,7 @@ class ChatService:
         issue_match_scores: dict[str, float],
         topic_match_scores: dict[str, float],
         recommendation_triggered: bool,
+        repetition_state: RepetitionState,
     ) -> DebugMeta | None:
         if not enabled:
             return None
@@ -951,4 +1127,9 @@ class ChatService:
             issue_match_scores=issue_match_scores,
             topic_match_scores=topic_match_scores,
             recommendation_triggered=recommendation_triggered,
+            repeated_message_count=repetition_state.repeated_message_count,
+            repeated_meaning_count=repetition_state.repeated_meaning_count,
+            exact_repetition_count=repetition_state.exact_repetition_count,
+            semantic_repetition_count=repetition_state.semantic_repetition_count,
+            loop_detected=repetition_state.loop_detected,
         )

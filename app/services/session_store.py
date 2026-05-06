@@ -3,12 +3,15 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from uuid import uuid4
 
+from app.services.repetition_detector import RepetitionState
+
 
 class SessionStore:
     def __init__(self, max_turns: int = 8) -> None:
         self.max_turns = max_turns
         self._history: dict[str, deque] = defaultdict(lambda: deque(maxlen=max_turns * 2))
         self._assistant_turns: dict[str, int] = defaultdict(int)
+        self._repetition_state: dict[str, dict] = defaultdict(dict)
 
     def ensure_conversation(self, conversation_id: str | None = None) -> str:
         if conversation_id and conversation_id.strip():
@@ -33,6 +36,13 @@ class SessionStore:
         self._assistant_turns[conversation_id] += 1
         return self._assistant_turns[conversation_id]
 
+    def get_repetition_state(self, conversation_id: str) -> RepetitionState:
+        return RepetitionState.from_dict(self._repetition_state.get(conversation_id))
+
+    def set_repetition_state(self, conversation_id: str, state: RepetitionState) -> None:
+        self._repetition_state[conversation_id] = state.to_dict()
+
     def clear(self, conversation_id: str) -> None:
         self._history.pop(conversation_id, None)
         self._assistant_turns.pop(conversation_id, None)
+        self._repetition_state.pop(conversation_id, None)

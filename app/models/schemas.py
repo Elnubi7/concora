@@ -47,6 +47,11 @@ class DebugMeta(BaseModel):
     issue_match_scores: dict[str, float] = Field(default_factory=dict)
     topic_match_scores: dict[str, float] = Field(default_factory=dict)
     recommendation_triggered: bool = False
+    repeated_message_count: int = 1
+    repeated_meaning_count: int = 1
+    exact_repetition_count: int = 1
+    semantic_repetition_count: int = 1
+    loop_detected: bool = False
 
 
 class StructuredAnswer(BaseModel):
@@ -70,7 +75,7 @@ class ChatRequest(BaseModel):
     max_books: int = Field(default=3, ge=0, le=6)
     max_podcasts: int = Field(default=2, ge=0, le=5)
     include_recommendations: bool = Field(default=True)
-    recommendations_after_turn: int = Field(default=3, ge=1, le=10)
+    recommendations_after_turn: int = Field(default=4, ge=1, le=10)
     recommendation_links_only: bool = Field(default=True, description="لو true لا تظهر أي توصية بدون رابط")
     debug: bool = Field(default=False, description="إرجاع بيانات تشخيصية آمنة للتطوير والاختبارات فقط")
 
