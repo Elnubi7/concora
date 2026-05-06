@@ -1,11 +1,13 @@
 from app.core.constants import CRISIS_KEYWORDS
 from app.models.schemas import SafetyMeta
+from app.utils.text_utils import normalize_text
 
 
 class SafetyService:
     def inspect(self, message: str, user_gender: str, audience_mode: str) -> SafetyMeta:
-        lowered = message.lower()
-        if any(keyword in lowered for keyword in CRISIS_KEYWORDS):
+        normalized = normalize_text(message)
+        normalized_keywords = {normalize_text(keyword) for keyword in CRISIS_KEYWORDS}
+        if any(keyword in normalized for keyword in normalized_keywords):
             return SafetyMeta(
                 is_crisis=True,
                 blocked=True,

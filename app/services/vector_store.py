@@ -50,11 +50,27 @@ class VectorStore:
             encoding="utf-8",
         )
 
-    async def search(self, query: str, mbti_type: str | None, top_k: int = 8) -> list[dict]:
+    async def search(
+        self,
+        query: str,
+        mbti_type: str | None,
+        top_k: int = 8,
+        *,
+        history_context: list[str] | None = None,
+        intent: str | None = None,
+        primary_emotion: str | None = None,
+    ) -> list[dict]:
         if not self.vectors and self.settings.VECTOR_INDEX_PATH.exists():
             self._load_saved_index()
 
         query_vector: list[float] | None = None
+        history_text = " ".join(history_context or [])
+        problem_focused = intent in {
+            "SHORT_EMOTIONAL_SIGNAL",
+            "VAGUE_DISTRESS",
+            "CLEAR_PROBLEM_STATEMENT",
+            "ADVICE_REQUEST",
+        }
         if self.github_client.enabled:
             try:
                 await self.ensure_index(rebuild=False)
@@ -68,19 +84,31 @@ class VectorStore:
             score = 0.0
             if chunk.get("domain") == "mbti":
                 if mbti_type and chunk.get("mbti_type") == mbti_type:
-                    score += 0.75
+                    score += 0.22 if problem_focused else 0.55
                 elif mbti_type and chunk.get("mbti_type") != mbti_type:
-                    score -= 0.08
+                    score -= 0.04
             elif chunk.get("domain") == "emotion":
-                score += 0.22
+                score += 0.5 if problem_focused else 0.22
 
             if chunk.get("chunk_type") in {"issue", "emotion_question"}:
-                score += 0.15
+                score += 0.24 if problem_focused else 0.15
             elif chunk.get("chunk_type") in {"overview", "emotion_topic"}:
                 score += 0.06
 
-            score += lexical_overlap_score(query, chunk["text"]) * 1.8
-            score += lexical_overlap_score(query, chunk.get("title", "")) * 0.9
+            text_overlap = lexical_overlap_score(query, chunk["text"])
+            title_overlap = lexical_overlap_score(query, chunk.get("title", ""))
+            score += text_overlap * 1.85
+            score += title_overlap * 1.15
+
+            if history_text:
+                score += lexical_overlap_score(history_text, chunk["text"]) * 0.65
+
+            if primary_emotion:
+                emotion_signal = f"{primary_emotion} {chunk.get('title', '')} {chunk.get('topic_title', '')} {chunk['text']}"
+                score += lexical_overlap_score(primary_emotion, emotion_signal) * 0.6
+
+            if problem_focused and chunk.get("domain") == "emotion" and text_overlap >= 0.08:
+                score += 0.25
 
             if query_vector is not None and chunk["id"] in self.vectors:
                 score += cosine_similarity(query_vector, self.vectors[chunk["id"]]) * 2.2

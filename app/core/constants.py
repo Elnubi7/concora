@@ -15,7 +15,10 @@ ARABIC_STOPWORDS = {
 CRISIS_KEYWORDS = {
     "انتحار", "أنتحر", "اقتلي نفسي", "اقتل نفسي", "أؤذي نفسي", "اؤذي نفسي",
     "أذي نفسي", "اذي نفسي", "مش عايزة أعيش", "مش عايزه اعيش", "نفسي أموت",
-    "نفسي اموت", "self harm", "suicide", "kill myself", "hurt myself",
+    "نفسي اموت", "مش عايزة أكمل", "مش عايزه اكمل", "مش عايز اكمل", "مش قادر اكمل",
+    "مش قادره اكمل", "مش عاوز اعيش", "مش عايز اعيش", "نفسي اختفي", "نفسي أختفي",
+    "self harm", "suicide", "kill myself", "hurt myself", "don't want to live",
+    "dont want to live", "don't want to continue", "dont want to continue",
 }
 
 SYSTEM_RULES = """

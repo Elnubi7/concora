@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from app.services.chat_service import ChatService
+from app.services.conversation_policy import ConversationPolicy
+from app.services.answer_deduper import AnswerDeduper
 from app.services.fallback_service import FallbackService
 from app.services.github_models_client import GitHubModelsClient
 from app.services.knowledge_service import KnowledgeBaseService
@@ -18,6 +20,8 @@ class AppContainer:
         self.safety_service = SafetyService()
         self.session_store = SessionStore(max_turns=settings.HISTORY_TURNS_TO_KEEP)
         self.fallback_service = FallbackService()
+        self.conversation_policy = ConversationPolicy(settings)
+        self.answer_deduper = AnswerDeduper()
         self.chat_service = ChatService(
             settings=settings,
             kb_service=self.kb_service,
@@ -26,6 +30,8 @@ class AppContainer:
             safety_service=self.safety_service,
             session_store=self.session_store,
             fallback_service=self.fallback_service,
+            conversation_policy=self.conversation_policy,
+            answer_deduper=self.answer_deduper,
         )
 
     async def initialize(self) -> None:

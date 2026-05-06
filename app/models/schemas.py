@@ -40,12 +40,23 @@ class RecommendationsMeta(BaseModel):
     note: str
 
 
+class DebugMeta(BaseModel):
+    detected_intent: str
+    response_mode: str
+    followup_question_reason: str | None = None
+    issue_match_scores: dict[str, float] = Field(default_factory=dict)
+    topic_match_scores: dict[str, float] = Field(default_factory=dict)
+    recommendation_triggered: bool = False
+
+
 class StructuredAnswer(BaseModel):
     understanding: str = Field(..., description="فهم مختصر للسؤال")
-    mbti_connection: str = Field(..., description="ربط احتمالي غير قطعي مع MBTI")
+    mbti_connection: str = Field(default="", description="ربط احتمالي غير قطعي مع MBTI")
     grounded_answer: str = Field(..., description="إجابة retrieval-based بدون ادعاء مبالغ")
     practical_steps: list[str] = Field(default_factory=list, description="خطوات عملية قصيرة")
-    support_note: str = Field(..., description="تنبيه الدعم الآمن")
+    follow_up_question: str | None = Field(default=None, description="سؤال متابعة قصير عند الحاجة")
+    choice_prompt: str | None = Field(default=None, description="اختيار لطيف يساعد المستخدم يوضح أكثر")
+    support_note: str = Field(default="", description="تنبيه الدعم الآمن")
 
 
 class ChatRequest(BaseModel):
@@ -61,6 +72,7 @@ class ChatRequest(BaseModel):
     include_recommendations: bool = Field(default=True)
     recommendations_after_turn: int = Field(default=3, ge=1, le=10)
     recommendation_links_only: bool = Field(default=True, description="لو true لا تظهر أي توصية بدون رابط")
+    debug: bool = Field(default=False, description="إرجاع بيانات تشخيصية آمنة للتطوير والاختبارات فقط")
 
     @field_validator("mbti_type")
     @classmethod
@@ -89,6 +101,7 @@ class ChatResponse(BaseModel):
     recommended_podcasts: list[ResourceItem] = Field(default_factory=list)
     safety: SafetyMeta
     retrieved_chunks: list[RetrievedChunk] = Field(default_factory=list)
+    debug: DebugMeta | None = None
 
 
 class MBTIOverview(BaseModel):

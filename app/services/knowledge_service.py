@@ -5,7 +5,10 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-from docx import Document
+try:
+    from docx import Document
+except ModuleNotFoundError:  # pragma: no cover - environment dependent
+    Document = None
 
 from app.utils.text_utils import lexical_overlap_score, normalize_text, tokenize
 
@@ -58,6 +61,11 @@ class KnowledgeBaseService:
         self.rebuild_from_sources()
 
     def rebuild_from_sources(self) -> None:
+        if Document is None:
+            if self.settings.KB_JSON_PATH.exists() and self.settings.CHUNKS_JSON_PATH.exists():
+                self.load()
+                return
+            raise RuntimeError("python-docx is required to rebuild knowledge from .docx sources.")
         mbti = self._parse_mbti_doc(self.settings.MBTI_DOCX_PATH)
         emotion = self._parse_emotion_doc(self.settings.EMOTION_DOCX_PATH)
         self.knowledge = {"mbti": mbti, "emotion": emotion}
@@ -189,7 +197,7 @@ class KnowledgeBaseService:
         for item in candidates:
             if category and item.get("category") != category:
                 continue
-            if require_url and not item.get("url"):
+            if require_url and not self._has_valid_url(item.get("url")):
                 continue
             if item.get("source_collection") == "mbti" and mbti_type and item.get("mbti_type") not in {None, mbti_type}:
                 continue
@@ -215,7 +223,7 @@ class KnowledgeBaseService:
                 score += 2.2
             if item.get("source_collection") == "mbti" and mbti_type and item.get("mbti_type") == mbti_type:
                 score += 0.35
-            if item.get("url"):
+            if self._has_valid_url(item.get("url")):
                 score += 0.35
             score += query_overlap * 2.4
             score += issue_overlap * 1.4
@@ -229,7 +237,7 @@ class KnowledgeBaseService:
 
             if category == "book" and not self._is_true_book(item):
                 continue
-            if category in {"video", "podcast"} and not item.get("url"):
+            if category in {"video", "podcast"} and not self._has_valid_url(item.get("url")):
                 continue
             if score < 0.7:
                 continue
@@ -868,6 +876,12 @@ class KnowledgeBaseService:
             return host or None
         except Exception:
             return None
+
+    def _has_valid_url(self, url: str | None) -> bool:
+        if not url or not isinstance(url, str):
+            return False
+        clean = url.strip().lower()
+        return clean.startswith("http://") or clean.startswith("https://")
 
     def _dedupe_similar(self, items: list[str]) -> list[str]:
         result: list[str] = []

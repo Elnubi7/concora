@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     DEFAULT_MAX_VIDEOS: int = 2
     DEFAULT_MAX_BOOKS: int = 3
     DEFAULT_MAX_PODCASTS: int = 2
+    CHAT_FOLLOWUP_TURNS: int = 2
+    DEBUG_CHAT_METADATA: bool = False
 
     CORS_ORIGINS: list[str] = Field(default_factory=lambda: ["*"])
 
