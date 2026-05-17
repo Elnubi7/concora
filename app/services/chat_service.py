@@ -13,6 +13,9 @@ from app.models.schemas import (
     StructuredAnswer,
 )
 from app.services.answer_deduper import AnswerDeduper
+from app.services.clinical_intent_pipeline import (
+    generateFinalBotReply,
+)
 from app.services.conversation_policy import (
     INTENT_RESOURCE_REQUEST,
     MODE_CHAT,
@@ -53,6 +56,8 @@ class ChatService:
     async def chat(self, request) -> ChatResponse:
         response_style = self._resolve_response_style(request.response_style, request.user_gender)
         conversation_id = self.session_store.ensure_conversation(request.conversation_id)
+        previous_context = self.session_store.get_history(conversation_id)
+        intent_gate = generateFinalBotReply(request.user_message, previous_context)
         self.session_store.append_user_message(conversation_id, request.user_message)
         conversation_history = self.session_store.get_history(conversation_id)
         repetition_state = self.repetition_detector.detect(
@@ -109,6 +114,41 @@ class ChatService:
                     topic_match_scores={},
                     recommendation_triggered=False,
                     repetition_state=repetition_state,
+                ),
+            )
+
+        if intent_gate["strategy"] != "pass_to_existing_mental_health":
+            structured = self._compose_intent_gate_response(intent_gate)
+            turn_number = self.session_store.append_assistant_message(conversation_id, self._history_text(structured))
+            self._store_assistant_repetition_state(
+                conversation_id=conversation_id,
+                repetition_state=repetition_state,
+                response_mode=self._intent_gate_response_mode(intent_gate),
+                structured=structured,
+            )
+            return ChatResponse(
+                source="intent_detection_layer",
+                conversation_id=conversation_id,
+                turn_number=turn_number,
+                mbti_type=request.mbti_type,
+                safety=safety,
+                response=structured,
+                recommendations=RecommendationsMeta(
+                    unlocked=False,
+                    current_turn=turn_number,
+                    unlock_turn=unlock_turn,
+                    note="لم يتم عرض توصيات لأن الرد الحالي كان توضيحًا أو أمانًا طبيًا مباشرًا.",
+                ),
+                debug=self._build_debug_meta(
+                    enabled=request.debug or self.settings.DEBUG_CHAT_METADATA,
+                    detected_intent=intent_gate["intent"],
+                    response_mode=self._intent_gate_response_mode(intent_gate),
+                    followup_question_reason="intent_gate",
+                    issue_match_scores={},
+                    topic_match_scores={},
+                    recommendation_triggered=False,
+                    repetition_state=repetition_state,
+                    intent_gate=intent_gate,
                 ),
             )
 
@@ -395,6 +435,46 @@ class ChatService:
         if self.settings.TARGET_AUDIENCE != "female_only" and user_gender != "female":
             return "neutral"
         return style
+
+    def _compose_intent_gate_response(self, intent_gate: dict[str, Any]) -> StructuredAnswer:
+        reply = (intent_gate.get("reply") or "").strip()
+        strategy = intent_gate.get("strategy")
+        if not reply:
+            reply = "مش واضح قصدك. ممكن تكتب السؤال تاني بشكل أوضح؟"
+
+        if strategy == "clarification":
+            return StructuredAnswer(
+                understanding=reply,
+                mbti_connection="",
+                grounded_answer="لم أقدم نصيحة طبية لأن الرسالة غير واضحة أو المعلومات ناقصة.",
+                practical_steps=[],
+                follow_up_question=None,
+                choice_prompt=None,
+                support_note="اكتب المشكلة والأعراض والمدة وأي أدوية أو علامات خطر لو موجودة.",
+            )
+
+        first_block, _, rest = reply.partition("\n\n")
+        return StructuredAnswer(
+            understanding=self._trim_sentence(first_block or reply),
+            mbti_connection="",
+            grounded_answer=rest.strip() or reply,
+            practical_steps=[],
+            follow_up_question=None,
+            choice_prompt=None,
+            support_note="المعلومات هنا إرشادية ولا تغني عن طبيب/صيدلي عند الحاجة أو ظهور علامات خطر.",
+        )
+
+    def _intent_gate_response_mode(self, intent_gate: dict[str, Any]) -> str:
+        strategy = intent_gate.get("strategy")
+        if strategy == "emergency":
+            return MODE_CRISIS
+        if strategy == "clarification":
+            return "CLARIFICATION_MODE"
+        if strategy == "medical":
+            return "MEDICAL_SAFETY_MODE"
+        if strategy == "medication":
+            return "MEDICATION_SAFETY_MODE"
+        return MODE_CHAT
 
     def _compose_chat_mode_response(
         self,
@@ -1117,6 +1197,7 @@ class ChatService:
         topic_match_scores: dict[str, float],
         recommendation_triggered: bool,
         repetition_state: RepetitionState,
+        intent_gate: dict[str, Any] | None = None,
     ) -> DebugMeta | None:
         if not enabled:
             return None
@@ -1124,6 +1205,15 @@ class ChatService:
             detected_intent=detected_intent,
             response_mode=response_mode,
             followup_question_reason=followup_question_reason,
+            intent_confidence=float(intent_gate["confidence"]) if intent_gate and intent_gate.get("confidence") is not None else None,
+            missing_information=list(intent_gate.get("missing_information", [])) if intent_gate else [],
+            safety_level=str(intent_gate.get("safety_level")) if intent_gate and intent_gate.get("safety_level") else None,
+            should_answer_directly=bool(intent_gate.get("should_answer_directly")) if intent_gate else None,
+            should_ask_clarification=bool(intent_gate.get("should_ask_clarification")) if intent_gate else None,
+            is_understandable=bool(intent_gate.get("is_understandable")) if intent_gate else None,
+            has_enough_context=bool(intent_gate.get("has_enough_context")) if intent_gate else None,
+            related_to_previous=bool(intent_gate.get("related_to_previous")) if intent_gate else None,
+            red_flags=list(intent_gate.get("red_flags", [])) if intent_gate else [],
             issue_match_scores=issue_match_scores,
             topic_match_scores=topic_match_scores,
             recommendation_triggered=recommendation_triggered,

@@ -3,18 +3,52 @@ const rebuildBtn = document.getElementById("rebuild_btn");
 const answerBox = document.getElementById("answer_box");
 const recommendationsBox = document.getElementById("recommendations_box");
 const retrievalBox = document.getElementById("retrieval_box");
+const messageInput = document.getElementById("user_message");
+
+if (messageInput) {
+  messageInput.placeholder = navigator.language?.startsWith("ar") ? "اكتب رسالتك..." : "Type your message...";
+}
+
+function renderAnswer(data) {
+  if (typeof data.answer === "string") {
+    return data.answer;
+  }
+  const response = data.response || {};
+  return [
+    response.understanding,
+    response.mbti_connection,
+    response.grounded_answer,
+    Array.isArray(response.practical_steps) && response.practical_steps.length
+      ? response.practical_steps.map((step) => `• ${step}`).join("\n")
+      : "",
+    response.follow_up_question,
+    response.choice_prompt,
+    response.support_note
+  ].filter(Boolean).join("\n\n") || "No answer";
+}
 
 sendBtn.addEventListener("click", async () => {
+  if (sendBtn.disabled) {
+    return;
+  }
+
   const payload = {
     mbti_type: document.getElementById("mbti").value,
-    user_message: document.getElementById("user_message").value,
+    user_message: messageInput.value,
     user_gender: "female",
-    session_id: document.getElementById("session_id").value || null,
+    conversation_id: document.getElementById("session_id").value || null,
     include_recommendations: true,
     top_k: 6
   };
 
-  answerBox.textContent = "جاري الإرسال...";
+  if (!payload.user_message.trim()) {
+    answerBox.textContent = "اكتب رسالتك الأول.";
+    return;
+  }
+
+  sendBtn.disabled = true;
+  answerBox.classList.add("typing");
+  answerBox.textContent = "الروبوت يكتب...";
   recommendationsBox.innerHTML = "";
   retrievalBox.textContent = "";
 
@@ -24,11 +58,19 @@ sendBtn.addEventListener("click", async () => {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify(payload)
     });
+    if (!response.ok) {
+      throw new Error(`Request failed: ${response.status}`);
+    }
     const data = await response.json();
-    answerBox.textContent = data.answer || "No answer";
+    answerBox.textContent = renderAnswer(data);
 
-    if (Array.isArray(data.recommendations) && data.recommendations.length) {
-      recommendationsBox.innerHTML = data.recommendations.map(item => {
+    const resources = [
+      ...(data.recommended_videos || []),
+      ...(data.recommended_books || []),
+      ...(data.recommended_podcasts || [])
+    ];
+    if (resources.length) {
+      recommendationsBox.innerHTML = resources.map(item => {
         const urlPart = item.url ? `<div><a href="${item.url}" target="_blank" rel="noreferrer">فتح الرابط</a></div>` : "";
         return `
           <div class="resource">
@@ -44,8 +86,11 @@ sendBtn.addEventListener("click", async () => {
 
     retrievalBox.textContent = JSON.stringify(data.retrieved_chunks || [], null, 2);
   } catch (error) {
-    answerBox.textContent = "حصل خطأ أثناء الإرسال.";
+    answerBox.textContent = "حصل خطأ مؤقت في الرد. حاول مرة تانية.";
     console.error(error);
+  } finally {
+    answerBox.classList.remove("typing");
+    sendBtn.disabled = false;
   }
 });
 

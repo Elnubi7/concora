@@ -44,6 +44,15 @@ class DebugMeta(BaseModel):
     detected_intent: str
     response_mode: str
     followup_question_reason: str | None = None
+    intent_confidence: float | None = None
+    missing_information: list[str] = Field(default_factory=list)
+    safety_level: str | None = None
+    should_answer_directly: bool | None = None
+    should_ask_clarification: bool | None = None
+    is_understandable: bool | None = None
+    has_enough_context: bool | None = None
+    related_to_previous: bool | None = None
+    red_flags: list[str] = Field(default_factory=list)
     issue_match_scores: dict[str, float] = Field(default_factory=dict)
     topic_match_scores: dict[str, float] = Field(default_factory=dict)
     recommendation_triggered: bool = False
